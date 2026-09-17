@@ -55,7 +55,26 @@ export default defineConfig({
   // Functional specs mutate one shared seeded workspace. Running them in
   // parallel creates cross-test races in portal auth, membership, and roadmap
   // settings, so serialize only that suite; screenshot captures stay parallel.
+  //
+  // NOTE: this only serializes *within* one run. Serializing *across*
+  // concurrent runs (multiple agents, multiple worktrees) is handled by the
+  // machine-wide lock in scripts/run-functional-e2e.mjs — see the comment
+  // there. `workers: 1` alone does not prevent N simultaneous dev servers.
   workers: functional ? 1 : undefined,
+
+  // This repo keeps many nested git worktrees, each a full checkout with its
+  // own `e2e/` tree and (often) its own `node_modules` carrying a second copy
+  // of Playwright. Any project whose testDir resolves to the repository root —
+  // `screenshots` does, since it sets only testMatch — would otherwise walk
+  // into them and collect duplicate specs, multiplying browser launches.
+  // The `functional-setup` project already worked around this by narrowing its
+  // testDir; ignore the directories globally so the next project that forgets
+  // to narrow its own testDir cannot reintroduce the fan-out.
+  testIgnore: [
+    "**/node_modules/**",
+    "**/.claude/worktrees/**",
+    "**/.worktrees/**",
+  ],
 
   ...(functional && {
     globalSetup: "./e2e/functional/global-setup.ts",
