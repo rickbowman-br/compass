@@ -5,21 +5,44 @@
  * `fetch` from a page Compass does not serve, so every failure below is a JSON
  * status and never a redirect.
  *
- * Three independent checks gate a request, in this order:
+ * Three independent checks gate every request, in this order:
  *
  *   1. **Embed token** — `Authorization: Bearer cmpfb_…`, hashed and looked up.
- *      This is the only credential; no cookie is read and none would arrive
- *      (`SameSite=Lax`, and `Access-Control-Allow-Credentials` is never set).
+ *      No cookie is read and none would arrive (`SameSite=Lax`, and
+ *      `Access-Control-Allow-Credentials` is never set).
  *   2. **Origin allowlist** — the request's `Origin` must appear verbatim in the
  *      source's allowlist. This is the check that limits a leaked token to the
  *      pages it was issued for; the wildcard CORS header does NOT do that and
  *      must not be mistaken for it.
  *   3. **Rate limit** — per token, per minute, compare-and-set.
  *
- * Reading is additionally gated on `Workspace.artifactFeedbackPublic`. Submitting
- * is not: an embed token is an explicit grant to write, whereas showing an
- * existing internal review thread to an anonymous reader is a publication
- * decision the workspace has to make on purpose.
+ * ## Reading is open; writing is not
+ *
+ * Reading is additionally gated on `Workspace.artifactFeedbackPublic` and needs
+ * no identity: anyone holding the page can read the thread. **Submitting
+ * additionally requires a verified portal identity** — a fourth check, presented
+ * in the `X-Compass-Visitor` header as the scoped visitor token from
+ * lib/embed-visitor.ts and resolved back to a `PortalAccount`.
+ *
+ * That token, and not the portal session cookie, for two reasons. The cookie is
+ * `SameSite=Lax` and so never accompanies this cross-site `fetch` — but the
+ * reason it is not simply re-sent as a bearer instead is that a portal session
+ * authenticates its holder to the roadmap and the feedback portal for thirty
+ * days, and this credential ends up in the JavaScript of a page Compass does not
+ * control. The visitor token authorizes one thing: commenting through this one
+ * source.
+ *
+ * The embed token is not an identity and must not be read as one. It says *this
+ * page may talk to this feedback source*; it says nothing about who is typing,
+ * and every visitor to a prototype page shares it. Accepting a free-text name
+ * alongside it — which this route did in its first draft — produces a thread
+ * whose every author is unverifiable, and attributes comments to whoever the
+ * submitter claimed to be. The prior art this feature comes from shipped exactly
+ * that, then deliberately deleted the name field for exactly this reason.
+ *
+ * So `Comment.authorName` here is derived server-side from the resolved account
+ * and no caller-supplied name or email is read. Anonymous *reading* is the
+ * feature; anonymous *writing* was never part of it.
  */
 import type { NextRequest } from "next/server"
 import getPrisma from "@/lib/db"
@@ -33,7 +56,10 @@ import {
   touchEmbedToken,
   type ResolvedEmbedSource,
 } from "@/lib/embed-sources"
-import { embedCorsPreflight, embedError, embedJson, readBoundedEmbedBody } from "@/lib/embed/http"
+import { resolveEmbedVisitorToken } from "@/lib/embed-visitor"
+import { isEmbedScreenshotUrl } from "@/lib/embed-screenshots"
+import type { PortalIdentity } from "@/lib/portal-auth"
+import { EMBED_VISITOR_HEADER, embedCorsPreflight, embedError, embedJson, readBoundedEmbedBody } from "@/lib/embed/http"
 
 const METHODS = "GET, POST"
 
@@ -41,7 +67,6 @@ const METHODS = "GET, POST"
 const MAX_BODY_LENGTH = 4000
 const MAX_URL_LENGTH = 2048
 const MAX_SELECTOR_LENGTH = 1000
-const MAX_NAME_LENGTH = 200
 
 export async function OPTIONS() {
   return embedCorsPreflight(METHODS)
@@ -78,6 +103,7 @@ type AnchorRow = {
   pagePath: string
   elementSelector: string | null
   elementFingerprint: unknown
+  screenshotUrl: string | null
 }
 
 type CommentRow = {
@@ -114,6 +140,14 @@ export type EmbedCommentDto = {
     pagePath: string
     elementSelector: string | null
     elementFingerprint: unknown
+    /**
+     * Included in the public read shape on purpose. The thread is readable by
+     * anyone holding the page, and this image is a picture of that same page — so
+     * it discloses nothing the reader cannot already see, and withholding it
+     * would leave a commenter unable to see the evidence attached to their own
+     * comment.
+     */
+    screenshotUrl: string | null
   } | null
   replies: EmbedCommentDto[]
 }
@@ -134,6 +168,7 @@ function toDto(row: CommentRow, replies: CommentRow[] = []): EmbedCommentDto {
           pagePath: row.elementAnchor.pagePath,
           elementSelector: row.elementAnchor.elementSelector,
           elementFingerprint: row.elementAnchor.elementFingerprint ?? null,
+          screenshotUrl: row.elementAnchor.screenshotUrl,
         }
       : null,
     replies: replies.map((reply) => toDto(reply)),
@@ -171,7 +206,7 @@ export async function GET(request: NextRequest) {
       select: {
         id: true, parentId: true, body: true, status: true, authorName: true, source: true,
         createdAt: true, updatedAt: true,
-        elementAnchor: { select: { pageUrl: true, pagePath: true, elementSelector: true, elementFingerprint: true } },
+        elementAnchor: { select: { pageUrl: true, pagePath: true, elementSelector: true, elementFingerprint: true, screenshotUrl: true } },
       },
       orderBy: { createdAt: "asc" },
     })) as CommentRow[]
@@ -185,7 +220,7 @@ export async function GET(request: NextRequest) {
           select: {
             id: true, parentId: true, body: true, status: true, authorName: true, source: true,
             createdAt: true, updatedAt: true,
-            elementAnchor: { select: { pageUrl: true, pagePath: true, elementSelector: true, elementFingerprint: true } },
+            elementAnchor: { select: { pageUrl: true, pagePath: true, elementSelector: true, elementFingerprint: true, screenshotUrl: true } },
           },
           orderBy: { createdAt: "asc" },
         })) as CommentRow[])
@@ -219,11 +254,28 @@ function text(value: unknown, max: number): string | null {
   return trimmed
 }
 
-/** Presence check only — this is a contact hint, not an authentication factor. */
-function optionalEmail(value: unknown): string | null {
-  const candidate = text(value, 255)
-  if (!candidate) return null
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate) ? candidate : null
+/**
+ * Resolves the writer from the `X-Compass-Visitor` scoped visitor token.
+ *
+ * `source.sourceId` is passed as the scope, not as a filter. A visitor token
+ * minted through one prototype must not authorize writes through another, even
+ * for the same signed-in person — the two prototypes are different deployments
+ * with different origin allowlists, and the embed token presented alongside is
+ * what names which one this is. Deriving the scope from the resolved embed token
+ * rather than from a request parameter is what makes that check meaningful.
+ *
+ * Deliberately tolerant of a `Bearer ` prefix: the widget holds two bearer-ish
+ * credentials and sending this one in the shape of the other is the obvious
+ * mistake. Whitespace-only, unknown, expired, revoked, and out-of-scope tokens
+ * are all indistinguishable from absent, so a caller learns only that it is not
+ * signed in here.
+ */
+async function readVisitor(request: NextRequest, source: ResolvedEmbedSource): Promise<PortalIdentity | null> {
+  const raw = request.headers.get(EMBED_VISITOR_HEADER)?.trim()
+  if (!raw) return null
+  const token = raw.toLowerCase().startsWith("bearer ") ? raw.slice(7).trim() : raw
+  if (!token) return null
+  return resolveEmbedVisitorToken(token, source.sourceId)
 }
 
 function fingerprint(value: unknown) {
@@ -250,6 +302,20 @@ export async function POST(request: NextRequest) {
     // make this server do work by sending one.
     await consumeEmbedRate(source.tokenId, "SUBMIT")
 
+    // Identity is checked before the body too, and for the same reason. The
+    // `code` is what tells the widget to open the sign-in flow rather than
+    // showing the visitor a dead end.
+    const visitor = await readVisitor(request, source)
+    if (!visitor) {
+      return embedError(
+        401,
+        "Sign in required to leave feedback.",
+        METHODS,
+        undefined,
+        "PORTAL_AUTH_REQUIRED"
+      )
+    }
+
     let payload: unknown
     try {
       payload = JSON.parse(await readBoundedEmbedBody(request))
@@ -265,8 +331,6 @@ export async function POST(request: NextRequest) {
     if (!body) return embedError(400, `Comment body is required and must be at most ${MAX_BODY_LENGTH} characters.`, METHODS)
 
     const parentId = text(input.parentId, 64)
-    const submitterEmail = optionalEmail(input.submitterEmail)
-    const submitterName = text(input.submitterName, MAX_NAME_LENGTH)
 
     // Only a root comment carries an anchor; a reply inherits its parent's.
     let elementAnchor: ElementAnchorInput | undefined
@@ -280,6 +344,13 @@ export async function POST(request: NextRequest) {
         elementSelector: text(input.elementSelector, MAX_SELECTOR_LENGTH),
         elementFingerprint: fingerprint(input.elementFingerprint),
         artifactRevisionId: text(input.artifactRevisionId, 64),
+        // Validated, not trusted. The widget obtained this URL from
+        // /api/embed/screenshot, but it arrives here from a page Compass does not
+        // control, and it will be rendered as an image to an internal reviewer —
+        // so anything that is not a blob URL under the embed prefix is dropped
+        // rather than rejected. Dropped, because a comment is worth keeping even
+        // when its decoration is not.
+        screenshotUrl: isEmbedScreenshotUrl(input.screenshotUrl) ? input.screenshotUrl : null,
       }
     }
 
@@ -293,10 +364,17 @@ export async function POST(request: NextRequest) {
       // Null on purpose: the submitter is not a Compass User. Their identity, if
       // any, lives on CommentExternalAuthor.
       authorId: null,
-      authorName: submitterName ?? submitterEmail ?? "Anonymous",
+      // Server-derived from the verified account, never from the request. A
+      // `submitterName` in the body is ignored rather than rejected, matching how
+      // lib/comments' own callers treat a caller-supplied author.
+      authorName: visitor.name ?? visitor.email,
       authorType: "HUMAN",
       elementAnchor,
-      externalAuthor: { submitterEmail, embedTokenId: source.tokenId },
+      externalAuthor: {
+        submitterEmail: visitor.email,
+        portalAccountId: visitor.portalAccountId,
+        embedTokenId: source.tokenId,
+      },
     })
 
     void touchEmbedToken(source.tokenId)

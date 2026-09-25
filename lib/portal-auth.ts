@@ -76,7 +76,7 @@ export async function createPortalSession(portalAccountId: string): Promise<stri
  * single call (and a single write) per request.
  */
 export const getPortalSession = cache(
-  async (): Promise<{ portalAccountId: string; email: string } | null> => {
+  async (): Promise<PortalIdentity | null> => {
     const cookieStore = await cookies();
     const rawToken = cookieStore.get(PORTAL_SESSION_COOKIE)?.value;
     if (!rawToken) return null;
@@ -89,7 +89,11 @@ export const getPortalSession = cache(
       select: {
         portalAccountId: true,
         expiresAt: true,
-        portalAccount: { select: { email: true } },
+        // `name` joins `email` here so a caller that has to *display* an identity
+        // has one to display. The embedded feedback widget derives
+        // `Comment.authorName` from this rather than from anything the submitting
+        // page sends, which is the whole reason it is selected.
+        portalAccount: { select: { email: true, name: true } },
       },
     });
 
@@ -110,9 +114,29 @@ export const getPortalSession = cache(
       console.error("[portal-auth] failed to bump PortalSession.lastUsedAt", err);
     }
 
-    return { portalAccountId: session.portalAccountId, email: session.portalAccount.email };
+    return {
+      portalAccountId: session.portalAccountId,
+      email: session.portalAccount.email,
+      name: session.portalAccount.name,
+    };
   }
 );
+
+/**
+ * A verified portal visitor.
+ *
+ * Named because more than one credential now resolves to one: this cookie, and
+ * the scoped visitor token the embedded widget presents (see
+ * lib/embed-visitor.ts). The two are deliberately NOT interchangeable as
+ * credentials — a portal session is a thirty-day first-party cookie, a visitor
+ * token is a twelve-hour bearer scoped to one feedback source — but what they
+ * establish is the same thing, so the consumers can be.
+ */
+export interface PortalIdentity {
+  portalAccountId: string;
+  email: string;
+  name: string | null;
+}
 
 /**
  * Deletes the current PortalSession row (if any) and always clears the

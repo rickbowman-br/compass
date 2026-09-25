@@ -101,6 +101,7 @@ describe("POST /api/portal/[orgSlug]/[workspaceSlug]/feedback", () => {
     mockGetPortalSession.mockResolvedValue({
       portalAccountId: "account-1",
       email: "verified@example.com",
+      name: null,
     });
 
     const res = await POST(

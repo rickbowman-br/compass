@@ -869,6 +869,12 @@ model CommentElementAnchor {
   /// DOCUMENT-relative, never viewport-relative, so a re-anchor attempt does not
   /// depend on the reader's scroll position or window size.
   elementFingerprint Json?    @map("element_fingerprint")
+  /// Vercel Blob URL of the element screenshot the widget captured, or null.
+  /// Evidence for a human reading the thread, never an input to re-anchoring —
+  /// elementSelector and elementFingerprint do that work. Always null for
+  /// comments made inside Compass, where the reviewer is already looking at the
+  /// artifact.
+  screenshotUrl      String?  @map("screenshot_url") @db.Text
   comment            Comment  @relation(fields: [commentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([artifactId, pageUrl], map: "idx_comment_element_anchors_artifact_page")
@@ -1699,6 +1705,8 @@ model PortalAccount {
   feedbackVotes FeedbackVote[]
   roadmapVotes  RoadmapVote[]
   externalComments CommentExternalAuthor[]
+  embedVisitorSessions EmbedVisitorSession[]
+  embedAuthHandoffs    EmbedAuthHandoff[]
 
   @@map("portal_accounts")
 }
@@ -1814,6 +1822,8 @@ model FeedbackSource {
   workspace      Workspace             @relation(fields: [workspaceId], references: [id])
   artifact       Artifact?             @relation(fields: [artifactId], references: [id])
   tokens         FeedbackSourceToken[]
+  visitorSessions EmbedVisitorSession[]
+  authHandoffs    EmbedAuthHandoff[]
 
   @@index([workspaceId, enabled], map: "idx_feedback_sources_workspace")
   @@index([artifactId], map: "idx_feedback_sources_artifact")
@@ -1855,6 +1865,63 @@ model FeedbackSourceToken {
   @@map("feedback_source_tokens")
 }
 
+/// The identity a widget visitor presents when submitting, scoped to exactly one
+/// FeedbackSource.
+///
+/// NOT a PortalSession, and deliberately not interchangeable with one. A visitor
+/// signs in through the normal portal magic link, but what the widget receives is
+/// this instead of the portal session token — because the widget's token ends up
+/// in the JavaScript of a page Compass does not control, and a PortalSession
+/// token would additionally authenticate that person to the roadmap and feedback
+/// portal for 30 days. This authorizes one thing: commenting through one source.
+///
+/// `expiresAt` is NOT NULL, which is the opposite choice from
+/// FeedbackSourceToken.expiresAt. That token is held by an operator's deployment
+/// and revocation is its kill switch; this one is held by a third party's page,
+/// so expiry has to be intrinsic rather than administrative.
+model EmbedVisitorSession {
+  id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  feedbackSourceId String         @map("feedback_source_id") @db.Uuid
+  portalAccountId  String         @map("portal_account_id") @db.Uuid
+  tokenHash        String         @unique(map: "idx_embed_visitor_sessions_hash") @map("token_hash") @db.VarChar(64)
+  expiresAt        DateTime       @map("expires_at")
+  revokedAt        DateTime?      @map("revoked_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  lastUsedAt       DateTime?      @map("last_used_at")
+  feedbackSource   FeedbackSource @relation(fields: [feedbackSourceId], references: [id])
+  portalAccount    PortalAccount  @relation(fields: [portalAccountId], references: [id])
+
+  @@index([feedbackSourceId, portalAccountId], map: "idx_embed_visitor_sessions_scope")
+  @@map("embed_visitor_sessions")
+}
+
+/// One leg of the sign-in handoff: how a credential crosses from the first-party
+/// popup, which holds the portal cookie, to the widget, which cannot receive it.
+///
+/// Knowledge of the nonce IS the credential, because the claim endpoint is
+/// necessarily unauthenticated — a widget on someone else's origin has no cookie,
+/// session, or header worth checking. What makes that a sound trade is that the
+/// nonce is CSPRNG-drawn, only its digest is stored, the window is two minutes,
+/// and a claim is single-use.
+///
+/// This row holds nothing claimable: it records that a nonce entitles its bearer
+/// to a session for this account and source, and the token is MINTED AT CLAIM
+/// TIME. The prior art this is ported from deposited the raw token instead, so
+/// reading its table during the handoff window yielded a usable credential.
+model EmbedAuthHandoff {
+  id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nonceHash        String         @unique(map: "idx_embed_auth_handoffs_nonce") @map("nonce_hash") @db.VarChar(64)
+  feedbackSourceId String         @map("feedback_source_id") @db.Uuid
+  portalAccountId  String         @map("portal_account_id") @db.Uuid
+  expiresAt        DateTime       @map("expires_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  feedbackSource   FeedbackSource @relation(fields: [feedbackSourceId], references: [id])
+  portalAccount    PortalAccount  @relation(fields: [portalAccountId], references: [id])
+
+  @@index([expiresAt], map: "idx_embed_auth_handoffs_expiry")
+  @@map("embed_auth_handoffs")
+}
+
 /// The FeedbackItem counterpart of CommentElementAnchor, for submissions from an
 /// unbound (real-application) FeedbackSource.
 ///
@@ -1870,6 +1937,9 @@ model FeedbackElementAnchor {
   pagePath           String       @map("page_path") @db.Text
   elementSelector    String?      @map("element_selector") @db.Text
   elementFingerprint Json?        @map("element_fingerprint")
+  /// Same meaning as CommentElementAnchor.screenshotUrl, kept identical so the
+  /// two anchor shapes stay interchangeable when the unbound path writes here.
+  screenshotUrl      String?      @map("screenshot_url") @db.Text
   feedbackItem       FeedbackItem @relation(fields: [feedbackItemId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([feedbackSourceId, pageUrl], map: "idx_feedback_element_anchors_source_page")

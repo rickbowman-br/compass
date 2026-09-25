@@ -114,6 +114,7 @@ describe("POST /api/portal/[orgSlug]/[workspaceSlug]/vote — feedback votes", (
     mockGetPortalSession.mockResolvedValue({
       portalAccountId: "account-1",
       email: "verified@example.com",
+      name: null,
     });
 
     const res = await POST(
@@ -139,6 +140,7 @@ describe("POST /api/portal/[orgSlug]/[workspaceSlug]/vote — roadmap votes", ()
     mockGetPortalSession.mockResolvedValue({
       portalAccountId: "account-1",
       email: "verified@example.com",
+      name: null,
     });
 
     const res = await POST(
@@ -186,6 +188,7 @@ describe("POST /api/portal/[orgSlug]/[workspaceSlug]/vote — roadmap votes", ()
     mockGetPortalSession.mockResolvedValue({
       portalAccountId: "account-1",
       email: "verified@example.com",
+      name: null,
     });
     mockRoadmapItem.findFirst.mockResolvedValue({ id: "rm-private", isPrivate: true });
 

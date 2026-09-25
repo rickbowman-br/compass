@@ -29,7 +29,49 @@ describe("isPublicPath", () => {
     // would be unreadable to the caller — it has to reach the handler and get a
     // JSON 401.
     expect(isPublicPath("/api/embed/comments")).toBe(true);
+    // The session endpoints and the screenshot upload are reached the same way and
+    // authorize themselves the same way, so they must be reachable too. Named
+    // individually rather than trusted to the prefix, so that adding a route under
+    // /api/embed/ that is NOT meant to be public shows up here as a decision.
+    expect(isPublicPath("/api/embed/session")).toBe(true);
+    expect(isPublicPath("/api/embed/screenshot")).toBe(true);
     expect(isPublicPath("/api/embed")).toBe(false);
+  });
+
+  it("allows the widget's sign-in popup", () => {
+    // The popup authenticates a *portal* account, a separate credential from the
+    // Compass session — so a 302 to /login would offer the wrong login entirely.
+    expect(isPublicPath("/embed/signin")).toBe(true);
+    // An exact path, not a prefix: a second page under this segment should have to
+    // be argued for in route-access.ts rather than inherited.
+    expect(isPublicPath("/embed/signin/anything")).toBe(false);
+    expect(isPublicPath("/embed")).toBe(false);
+  });
+
+  it("allows the widget script, which a third-party page loads in a script tag", () => {
+    // Gating this does not withhold anything — it is a static file in public/ with
+    // no secret in it. What it does is break the widget in a way that points
+    // nowhere: the browser follows the 302, receives the /login HTML, and tries to
+    // execute it as JavaScript, so the symptom is a syntax error rather than
+    // anything resembling an auth problem.
+    expect(isPublicPath("/embed/widget.js")).toBe(true);
+    // Exact, like /embed/signin. Notably a sourcemap is NOT covered: publishing one
+    // should be a deliberate addition here, not a side effect of this entry.
+    expect(isPublicPath("/embed/widget.js.map")).toBe(false);
+    expect(isPublicPath("/embed/widget")).toBe(false);
+  });
+
+  it("allows the vendored libraries the widget loads at runtime", () => {
+    expect(isPublicPath("/vendor/html-to-image.js")).toBe(true);
+    // A prefix here, unlike the two /embed entries, because this directory holds
+    // only vendored open-source builds — already world-readable by virtue of being
+    // in public/, and byte-identical to their published npm artifacts. There is
+    // nothing for the gate to protect, so naming each file would be ceremony.
+    expect(isPublicPath("/vendor/anything/nested.js")).toBe(true);
+    // The trailing slash is load-bearing: it keeps the allowance off a sibling
+    // route that merely starts with the same letters.
+    expect(isPublicPath("/vendor")).toBe(false);
+    expect(isPublicPath("/vendors/secret")).toBe(false);
   });
 
   it("allows token-authenticated participant research routes", () => {

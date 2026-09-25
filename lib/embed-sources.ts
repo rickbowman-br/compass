@@ -181,6 +181,100 @@ export function isOriginAllowed(allowedOrigins: string[], origin: string | null)
   return allowedOrigins.includes(origin)
 }
 
+/** Raised for input a human typed, so the message is safe to show them. */
+export class EmbedOriginError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "EmbedOriginError"
+  }
+}
+
+/** A generous ceiling on how many sites one source may be embedded on. */
+export const MAX_ALLOWED_ORIGINS = 20
+
+/**
+ * Canonicalizes one operator-typed origin, or throws {@link EmbedOriginError}.
+ *
+ * {@link isOriginAllowed} is an exact string comparison, which is only as strong
+ * as what got stored — `https://example.com/` (with the trailing slash a browser
+ * never sends) would silently match nothing, and the operator would see an
+ * allowlist that looks correct and blocks everything. So the canonical form is
+ * computed here, once, by the URL parser rather than by hand.
+ *
+ * Everything below is rejected rather than coerced:
+ *
+ *   - **A path, query, or fragment.** An `Origin` header is scheme + host + port
+ *     and nothing else, so `https://example.com/app` could never match. Trimming
+ *     it silently would store something the operator did not type.
+ *   - **A wildcard.** There is deliberately no pattern matching anywhere in this
+ *     module (see {@link isOriginAllowed}); accepting `*.example.com` here would
+ *     create an allowlist entry that can never match a real origin, which reads
+ *     as a subdomain grant while granting nothing.
+ *   - **Any scheme but http/https.** `file:` and sandboxed-iframe origins both
+ *     arrive as the literal string `null`, and a stored `"null"` would match
+ *     *every* such page at once. The URL parser rejects it for us; this is the
+ *     case worth knowing about, not a hypothetical.
+ *   - **Embedded credentials.** `https://user:pw@example.com` parses fine and
+ *     has origin `https://example.com`, so accepting it would quietly store a
+ *     different value than the one typed — and persist a password.
+ *
+ * `http:` is allowed because local prototype development needs it. That is not a
+ * weakening: the allowlist's job is to bound which pages may use a token, and a
+ * forged `Origin` is equally forgeable over TLS.
+ */
+export function normalizeAllowedOrigin(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) throw new EmbedOriginError("An origin cannot be blank.")
+  if (trimmed.includes("*")) {
+    throw new EmbedOriginError(
+      `"${trimmed}" contains a wildcard. List each site's exact origin, for example https://app.example.com.`
+    )
+  }
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    throw new EmbedOriginError(`"${trimmed}" is not a valid origin. Include the scheme, for example https://app.example.com.`)
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new EmbedOriginError(`"${trimmed}" must start with https:// or http://.`)
+  }
+  if (url.username || url.password) {
+    throw new EmbedOriginError(`"${trimmed}" must not contain a username or password.`)
+  }
+  // `new URL("https://example.com")` normalizes pathname to "/", so a bare
+  // origin and one with a trailing slash are both accepted; anything longer is
+  // a path the operator meant to include and must be told about.
+  if (url.pathname !== "/" || url.search || url.hash) {
+    throw new EmbedOriginError(
+      `"${trimmed}" includes a path. An origin is just the scheme, host, and port — for example ${url.origin}.`
+    )
+  }
+  // `url.origin` is the canonical form a browser sends: lowercased host, default
+  // port omitted, no trailing slash.
+  return url.origin
+}
+
+/**
+ * Normalizes and de-duplicates a whole allowlist, preserving the order typed.
+ *
+ * An empty list is permitted and means "accepts nothing" — a source can exist
+ * before anyone knows where it will be deployed, and {@link isOriginAllowed}
+ * already fails closed. Refusing to save one would be a worse failure than
+ * saving a source that cannot yet be used.
+ */
+export function normalizeAllowedOrigins(values: string[]): string[] {
+  const seen = new Set<string>()
+  for (const value of values) {
+    if (!value.trim()) continue
+    seen.add(normalizeAllowedOrigin(value))
+  }
+  if (seen.size > MAX_ALLOWED_ORIGINS) {
+    throw new EmbedOriginError(`A feedback source may list at most ${MAX_ALLOWED_ORIGINS} origins.`)
+  }
+  return [...seen]
+}
+
 function errorCode(error: unknown): string | undefined {
   return (error as { code?: string }).code
 }

@@ -27,9 +27,27 @@
  */
 import { NextResponse } from "next/server"
 
+/**
+ * Carries the visitor's scoped visitor token (`cmpvt_…`) on an embed request.
+ *
+ * A second, separate credential from the `Authorization: Bearer cmpfb_…` embed
+ * token, and the two answer different questions: the embed token says *this page
+ * may talk to this feedback source*, and this header says *who is writing*.
+ * Neither substitutes for the other, which is why they are not merged into one.
+ *
+ * It is a header rather than a cookie because PORTAL_SESSION_COOKIE is
+ * `SameSite=Lax` and these endpoints never set
+ * `Access-Control-Allow-Credentials`. Note that what travels here is NOT that
+ * cookie's value re-sent as a bearer — see lib/embed-visitor.ts for why a
+ * separate, narrower credential is minted instead.
+ */
+export const EMBED_VISITOR_HEADER = "X-Compass-Visitor"
+
 export const EMBED_CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  // The visitor header must be listed or the browser's preflight rejects it
+  // before the request is ever sent.
+  "Access-Control-Allow-Headers": `Authorization, Content-Type, ${EMBED_VISITOR_HEADER}`,
   "Access-Control-Max-Age": "86400",
 }
 
@@ -54,8 +72,20 @@ export function withEmbedCors(response: NextResponse, methods: string): NextResp
   return response
 }
 
-export function embedError(status: number, message: string, methods: string, extraHeaders?: Record<string, string>): NextResponse {
-  const response = NextResponse.json({ error: message }, { status, headers: extraHeaders })
+/**
+ * `code` is for the failures a widget must *act* on rather than merely display —
+ * chiefly PORTAL_AUTH_REQUIRED, which tells it to open the sign-in flow instead
+ * of showing the visitor an error. Matching the shape the portal feedback route
+ * already returns for the same condition.
+ */
+export function embedError(
+  status: number,
+  message: string,
+  methods: string,
+  extraHeaders?: Record<string, string>,
+  code?: string
+): NextResponse {
+  const response = NextResponse.json(code ? { error: message, code } : { error: message }, { status, headers: extraHeaders })
   return withEmbedCors(response, methods)
 }
 
@@ -70,8 +100,14 @@ export const MAX_EMBED_BODY_BYTES = 32 * 1024
  * Reads at most {@link MAX_EMBED_BODY_BYTES}, then stops. Same reasoning as
  * readBoundedBody in lib/oauth/http.ts: these routes are reachable without a
  * Compass session, so none of them may buffer an unbounded body.
+ *
+ * `limit` exists for the screenshot endpoint, whose payload is a base64 image and
+ * so is legitimately larger than a comment. It is a per-route ceiling rather than
+ * a raised global one: every other embed route should keep the 32 KB cap, and a
+ * single shared constant large enough for an image would have silently widened
+ * all of them.
  */
-export async function readBoundedEmbedBody(request: Request): Promise<string> {
+export async function readBoundedEmbedBody(request: Request, limit = MAX_EMBED_BODY_BYTES): Promise<string> {
   const reader = request.body?.getReader()
   if (!reader) return ""
   const chunks: Uint8Array[] = []
@@ -81,7 +117,7 @@ export async function readBoundedEmbedBody(request: Request): Promise<string> {
       const { done, value } = await reader.read()
       if (done) break
       length += value.length
-      if (length > MAX_EMBED_BODY_BYTES) {
+      if (length > limit) {
         await reader.cancel()
         throw new Error("Body too large")
       }

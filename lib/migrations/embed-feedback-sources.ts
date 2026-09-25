@@ -6,6 +6,8 @@ export const EMBED_FEEDBACK_TABLES = [
   "comment_element_anchors",
   "feedback_element_anchors",
   "comment_external_authors",
+  "embed_visitor_sessions",
+  "embed_auth_handoffs",
 ]
 
 export const EMBED_FEEDBACK_INDEXES = [
@@ -16,6 +18,10 @@ export const EMBED_FEEDBACK_INDEXES = [
   "idx_comment_element_anchors_artifact_page",
   "idx_feedback_element_anchors_source_page",
   "idx_comment_external_authors_account",
+  "idx_embed_visitor_sessions_hash",
+  "idx_embed_visitor_sessions_scope",
+  "idx_embed_auth_handoffs_nonce",
+  "idx_embed_auth_handoffs_expiry",
 ]
 
 /**
@@ -34,6 +40,16 @@ export const EMBED_FEEDBACK_INDEXES = [
  * - `comment_element_anchors.artifact_id` MUST be NOT NULL. The anchor is only
  *   ever written for an ARTIFACT-target comment, so a null there means a writer
  *   bypassed that invariant.
+ * - `embed_visitor_sessions.expires_at` MUST be NOT NULL — the opposite of the
+ *   token column above, and deliberately so. That credential lives in an
+ *   operator's deployment where revocation is the kill switch; this one lives in
+ *   a third party's page, so its expiry has to be intrinsic. A nullable column
+ *   here would let one row become a permanent credential on someone else's
+ *   origin.
+ * - `embed_visitor_sessions.feedback_source_id` and
+ *   `embed_auth_handoffs.feedback_source_id` MUST be NOT NULL. They are what
+ *   makes these credentials scoped; a null would be a session good for every
+ *   source in the deployment.
  */
 export async function assertEmbedFeedbackSourcesMigration(client: PoolClient, schema: string) {
   const expectedColumns = [
@@ -78,6 +94,20 @@ export async function assertEmbedFeedbackSourcesMigration(client: PoolClient, sc
     { name: "comment_external_authors.portal_account_id", nullable: true },
     { name: "comment_external_authors.embed_token_id", nullable: true },
     { name: "comment_external_authors.created_at", nullable: false },
+    { name: "embed_visitor_sessions.id", nullable: false },
+    { name: "embed_visitor_sessions.feedback_source_id", nullable: false },
+    { name: "embed_visitor_sessions.portal_account_id", nullable: false },
+    { name: "embed_visitor_sessions.token_hash", nullable: false },
+    { name: "embed_visitor_sessions.expires_at", nullable: false },
+    { name: "embed_visitor_sessions.revoked_at", nullable: true },
+    { name: "embed_visitor_sessions.created_at", nullable: false },
+    { name: "embed_visitor_sessions.last_used_at", nullable: true },
+    { name: "embed_auth_handoffs.id", nullable: false },
+    { name: "embed_auth_handoffs.nonce_hash", nullable: false },
+    { name: "embed_auth_handoffs.feedback_source_id", nullable: false },
+    { name: "embed_auth_handoffs.portal_account_id", nullable: false },
+    { name: "embed_auth_handoffs.expires_at", nullable: false },
+    { name: "embed_auth_handoffs.created_at", nullable: false },
   ]
 
   const columns = await client.query<{ table_name: string; column_name: string; is_nullable: string }>(
@@ -119,5 +149,14 @@ export async function assertEmbedFeedbackSourcesMigration(client: PoolClient, sc
   // credential and the lookup would be non-deterministic.
   if (!indexes.rows.find(row => row.name === "idx_feedback_source_tokens_hash")?.unique) {
     throw new Error("062_embed_feedback_sources: idx_feedback_source_tokens_hash is not unique")
+  }
+  // Same argument for the two credentials a widget visitor presents. Without
+  // uniqueness a hash collision — or a duplicate insert after a retried write —
+  // resolves to an arbitrary row, and for the handoff that means a nonce could be
+  // claimed more than once.
+  for (const name of ["idx_embed_visitor_sessions_hash", "idx_embed_auth_handoffs_nonce"]) {
+    if (!indexes.rows.find(row => row.name === name)?.unique) {
+      throw new Error(`062_embed_feedback_sources: ${name} is not unique`)
+    }
   }
 }

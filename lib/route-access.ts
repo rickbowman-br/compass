@@ -60,6 +60,26 @@ export function isPublicPath(pathname: string): boolean {
     // consults a session, and no Compass cookie travels here (SameSite=Lax, and
     // Access-Control-Allow-Credentials is never set).
     pathname.startsWith("/api/embed/") ||
+    // The widget's sign-in popup. A visitor arriving here has no Compass session
+    // and is not going to get one — this page authenticates a *portal* account,
+    // which is a separate credential on a separate table (lib/portal-auth.ts), so
+    // sending them to /login would offer the wrong login entirely. The page reads
+    // an embed token and a nonce from its query string, refuses a malformed pair
+    // before touching the database, and its server action refuses everything else.
+    // Listed as an exact path rather than a `/embed/` prefix so that adding a
+    // second page under this segment is a decision someone has to make here.
+    pathname === "/embed/signin" ||
+    // The widget script itself, loaded by a `<script src>` tag on a third-party
+    // page. A redirect here is worse than it sounds: the browser would fetch
+    // /login, receive HTML, and try to execute it as JavaScript, so the widget
+    // would fail with a syntax error rather than anything that points at auth.
+    //
+    // Nothing is withheld by gating it. It is a static file in public/, identical
+    // for every deployment, and it carries no secret — the embed token lives in
+    // the host page's script tag, not in here. Its whole job is to read that
+    // token and call the /api/embed/ routes above, each of which authenticates
+    // every request on its own.
+    pathname === "/embed/widget.js" ||
     // Participant research routes use a hashed, expiring study token. Their
     // API handlers validate the token and session-to-study scope themselves.
     pathname.startsWith("/research/") ||
@@ -85,6 +105,19 @@ export function isPublicPath(pathname: string): boolean {
     // so the middleware matcher catches them like any other route. Without
     // this, every screenshot in the public docs 302s to /login for anyone
     // without a session, making the images appear broken.
-    pathname.startsWith("/screenshots")
+    pathname.startsWith("/screenshots") ||
+    // Third-party libraries the embedded widget loads at runtime (currently just
+    // html-to-image, for element screenshots). Served from public/, so — like
+    // /screenshots above — the middleware matcher catches them and a missing entry
+    // here turns into a 302 to /login that the widget receives as HTML where it
+    // expected JavaScript.
+    //
+    // A prefix rather than a list of filenames, because this directory holds only
+    // vendored open-source builds: files that are already world-readable by virtue
+    // of being in public/, that are byte-identical to their published npm artifacts,
+    // and whose provenance is recorded in a header comment in each one. There is
+    // nothing here for the gate to protect, so a per-file decision would be
+    // ceremony rather than a control.
+    pathname.startsWith("/vendor/")
   )
 }

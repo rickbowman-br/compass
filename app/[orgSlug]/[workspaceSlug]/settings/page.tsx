@@ -32,6 +32,12 @@ import { AgentActivity } from "@/components/settings/agent-activity";
 import { agentsEnabled } from "@/lib/agent-access";
 import { AnalyticsSettingsPanel } from "@/components/analytics/analytics-settings-panel";
 import { listConnections, listMetrics } from "@/lib/analytics/service";
+import {
+  FeedbackSourcesPanel,
+  type ArtifactOption,
+  type FeedbackSourceRow,
+} from "@/components/settings/feedback-sources-panel";
+import { optionalCompassUrl, trustedCompassBaseUrl } from "@/lib/compass-url";
 
 export const metadata = { title: "Workspace Settings" };
 
@@ -58,6 +64,7 @@ export default async function SettingsPage({ params }: Props) {
       nowLimit: true,
       nextLimit: true,
       portalAuthRequired: true,
+      artifactFeedbackPublic: true,
       ssoEnabled: true,
       launchWorkflowEnabled: true,
       ssoSecretEncrypted: true,
@@ -169,6 +176,64 @@ export default async function SettingsPage({ params }: Props) {
   const grants = await prisma.agentWorkspaceGrant.findMany({ where: { workspaceId: workspace.id, revokedAt: null } });
   const workspaceAgents = await prisma.agent.findMany({ where: canManageCapabilityPacks ? { OR: [{ ownerUserId: { in: rawMembers.map((m) => m.userId) } }, { id: { in: grants.map((g) => g.agentId) } }] } : { id: { in: grants.map((g) => g.agentId) } }, orderBy: { name: "asc" } });
   const agentActivity = canManageCapabilityPacks ? await prisma.agentToolCall.findMany({ where: { workspaceId: workspace.id }, orderBy: { createdAt: "desc" }, take: 25 }) : [];
+  // Embed tokens are a public write credential, so the panel below is gated on
+  // the same bar its server actions enforce (resolveWorkspaceAdmin: workspace
+  // admin or org admin) — which is exactly what canManageCapabilityPacks is.
+  // Skipping the queries for non-admins also keeps two round-trips off the page
+  // for the majority of viewers who will never see the section.
+  const [rawFeedbackSources, rawFeedbackArtifacts] = canManageCapabilityPacks
+    ? await Promise.all([
+        prisma.feedbackSource.findMany({
+          where: { workspaceId: workspace.id },
+          orderBy: { createdAt: "asc" },
+          select: {
+            id: true,
+            name: true,
+            artifactId: true,
+            allowedOrigins: true,
+            enabled: true,
+            artifact: { select: { title: true } },
+            tokens: {
+              orderBy: { createdAt: "asc" },
+              select: {
+                id: true,
+                tokenPrefix: true,
+                label: true,
+                createdAt: true,
+                lastUsedAt: true,
+                revokedAt: true,
+                expiresAt: true,
+              },
+            },
+          },
+        }),
+        prisma.artifact.findMany({
+          where: { workspaceId: workspace.id, status: "ACTIVE" },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true, title: true },
+        }),
+      ])
+    : [[], []];
+  const feedbackSources: FeedbackSourceRow[] = rawFeedbackSources.map((source) => ({
+    id: source.id,
+    name: source.name,
+    artifactId: source.artifactId,
+    artifactTitle: source.artifact?.title ?? null,
+    // `allowedOrigins` is a Json column; anything that is not an array of strings
+    // did not come from normalizeAllowedOrigins and is not something the widget
+    // would honor either, so it is dropped rather than rendered.
+    allowedOrigins: Array.isArray(source.allowedOrigins)
+      ? source.allowedOrigins.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    enabled: source.enabled,
+    tokens: source.tokens,
+  }));
+  const feedbackArtifacts: ArtifactOption[] = rawFeedbackArtifacts;
+  // Resolved here rather than from window.location so the first client render
+  // matches the server's, and optional because a deployment without a configured
+  // URL should still render the panel — just without a copyable snippet.
+  const embedBaseUrl = optionalCompassUrl(() => trustedCompassBaseUrl().origin);
+
   const capabilityPacks: CapabilityPackSettingsRow[] = rawCapabilityPacks.map((attachment) => ({
     packId: attachment.capabilityPackVersion.capabilityPack.packId,
     sourceRepository: attachment.capabilityPackVersion.sourceRepository,
@@ -298,6 +363,22 @@ export default async function SettingsPage({ params }: Props) {
           launchWorkflowEnabled={workspace.launchWorkflowEnabled ?? false}
         />
       </SettingsSection>
+
+      {/*
+        Also after Portal, for the positional-index reason documented above: this
+        section's per-source toggles would otherwise shift the indices those
+        specs rely on.
+      */}
+      {canManageCapabilityPacks && <SettingsSection title="Embedded feedback" description="Let a prototype hosted elsewhere collect element-anchored feedback against an artifact in this workspace. Each source carries its own token and its own list of sites allowed to use it.">
+        <FeedbackSourcesPanel
+          orgSlug={orgSlug}
+          workspaceSlug={workspaceSlug}
+          initialSources={feedbackSources}
+          artifacts={feedbackArtifacts}
+          embedBaseUrl={embedBaseUrl}
+          artifactFeedbackPublic={workspace.artifactFeedbackPublic ?? false}
+        />
+      </SettingsSection>}
 
       <SettingsSection title="Branding" description="Customize the accent color, font, and logo shown across this workspace and its public portal.">
         <WorkspaceBrandingPanel

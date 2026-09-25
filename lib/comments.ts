@@ -45,6 +45,16 @@ export type ElementAnchorInput = {
     rectWRatio?: number
     rectHRatio?: number
   } | null
+  /**
+   * Vercel Blob URL of a screenshot of the anchored element, or null.
+   *
+   * Callers must not pass a URL a submitter handed them verbatim. The embed
+   * route validates the shape against the blob host and the embed prefix before
+   * it reaches here (see lib/embed-screenshots.ts) precisely because this value
+   * is rendered as an image to an internal reviewer, and an arbitrary URL there
+   * would be a tracking pixel aimed at the org.
+   */
+  screenshotUrl?: string | null
 }
 
 /// Identity for an author who is not a Compass User, so `authorId` can stay a
@@ -167,7 +177,7 @@ export async function createComment(input: CreateCommentInput) {
     if (input.solutionPlan) await tx.solutionPlanProposal.create({ data: { commentId: comment.id, trackedDecisionRequestId: input.solutionPlan.trackedDecisionRequestId ?? null, legacyPlanStatus: input.solutionPlan.legacyPlanStatus ?? null } })
     // artifactId is the comment's own targetId, never a caller-supplied value —
     // validateExtensions has already established targetType === "ARTIFACT".
-    if (input.elementAnchor) await tx.commentElementAnchor.create({ data: { commentId: comment.id, artifactId: input.targetId, artifactRevisionId: input.elementAnchor.artifactRevisionId ?? null, pageUrl: input.elementAnchor.pageUrl, pagePath: input.elementAnchor.pagePath, elementSelector: input.elementAnchor.elementSelector ?? null, elementFingerprint: input.elementAnchor.elementFingerprint ?? undefined } })
+    if (input.elementAnchor) await tx.commentElementAnchor.create({ data: { commentId: comment.id, artifactId: input.targetId, artifactRevisionId: input.elementAnchor.artifactRevisionId ?? null, pageUrl: input.elementAnchor.pageUrl, pagePath: input.elementAnchor.pagePath, elementSelector: input.elementAnchor.elementSelector ?? null, elementFingerprint: input.elementAnchor.elementFingerprint ?? undefined, screenshotUrl: input.elementAnchor.screenshotUrl ?? null } })
     if (input.externalAuthor) await tx.commentExternalAuthor.create({ data: { commentId: comment.id, submitterEmail: input.externalAuthor.submitterEmail ?? null, portalAccountId: input.externalAuthor.portalAccountId ?? null, embedTokenId: input.externalAuthor.embedTokenId ?? null } })
   } catch (error) {
     if (!capture) {

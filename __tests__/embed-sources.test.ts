@@ -20,11 +20,15 @@ vi.mock("@/lib/db", () => ({
 
 import {
   EMBED_TOKEN_PREFIX,
+  EmbedOriginError,
   EmbedSourceError,
+  MAX_ALLOWED_ORIGINS,
   MAX_EMBED_SUBMITS_PER_MINUTE,
   consumeEmbedRate,
   hashEmbedToken,
   isOriginAllowed,
+  normalizeAllowedOrigin,
+  normalizeAllowedOrigins,
   readEmbedBearer,
   resolveEmbedToken,
   touchEmbedToken,
@@ -247,5 +251,90 @@ describe("touchEmbedToken", () => {
     // a race.
     mockToken.update.mockRejectedValue(new Error("write conflict"));
     await expect(touchEmbedToken("token-1")).resolves.toBeUndefined();
+  });
+});
+
+describe("normalizeAllowedOrigin", () => {
+  it("returns the canonical origin a browser actually sends", () => {
+    // Each left-hand value is something an operator plausibly pastes; the
+    // right-hand value is what `Origin:` will literally contain.
+    expect(normalizeAllowedOrigin("https://app.example.com")).toBe("https://app.example.com");
+    expect(normalizeAllowedOrigin("  https://app.example.com  ")).toBe("https://app.example.com");
+    expect(normalizeAllowedOrigin("https://app.example.com/")).toBe("https://app.example.com");
+    expect(normalizeAllowedOrigin("HTTPS://APP.EXAMPLE.COM")).toBe("https://app.example.com");
+    expect(normalizeAllowedOrigin("https://app.example.com:443")).toBe("https://app.example.com");
+    expect(normalizeAllowedOrigin("http://localhost:3000")).toBe("http://localhost:3000");
+  });
+
+  it("produces a value isOriginAllowed will match, which is the whole point", () => {
+    const stored = [normalizeAllowedOrigin("https://app.example.com/")];
+    // Without normalization this stored entry would be "https://app.example.com/"
+    // and the exact-match check below would fail against every real request.
+    expect(isOriginAllowed(stored, "https://app.example.com")).toBe(true);
+  });
+
+  it("rejects a wildcard instead of storing an entry that can never match", () => {
+    expect(() => normalizeAllowedOrigin("https://*.example.com")).toThrow(EmbedOriginError);
+    expect(() => normalizeAllowedOrigin("*")).toThrow(/wildcard/);
+  });
+
+  it("rejects the literal null origin, which would match every file: and sandboxed frame at once", () => {
+    expect(() => normalizeAllowedOrigin("null")).toThrow(EmbedOriginError);
+    expect(() => normalizeAllowedOrigin("file:///Users/someone/proto.html")).toThrow(/https:\/\/ or http:\/\//);
+  });
+
+  it("rejects a scheme that is not http or https", () => {
+    expect(() => normalizeAllowedOrigin("ftp://example.com")).toThrow(/https:\/\/ or http:\/\//);
+    expect(() => normalizeAllowedOrigin("javascript:alert(1)")).toThrow(EmbedOriginError);
+  });
+
+  it("rejects embedded credentials rather than silently storing a password", () => {
+    expect(() => normalizeAllowedOrigin("https://user:secret@example.com")).toThrow(/username or password/);
+  });
+
+  it("rejects a path, query, or fragment rather than trimming it away", () => {
+    // An Origin header is scheme + host + port, so any of these could only ever
+    // have come from a misunderstanding worth surfacing.
+    expect(() => normalizeAllowedOrigin("https://example.com/app")).toThrow(/includes a path/);
+    expect(() => normalizeAllowedOrigin("https://example.com/?a=1")).toThrow(/includes a path/);
+    expect(() => normalizeAllowedOrigin("https://example.com/#top")).toThrow(/includes a path/);
+  });
+
+  it("rejects input with no scheme, since a bare host is not parseable as an origin", () => {
+    expect(() => normalizeAllowedOrigin("app.example.com")).toThrow(/not a valid origin/);
+    expect(() => normalizeAllowedOrigin("")).toThrow(/cannot be blank/);
+  });
+});
+
+describe("normalizeAllowedOrigins", () => {
+  it("de-duplicates after canonicalizing, not before", () => {
+    // These three strings are distinct as text and identical as origins.
+    expect(
+      normalizeAllowedOrigins(["https://app.example.com", "https://app.example.com/", "HTTPS://App.Example.com:443"])
+    ).toEqual(["https://app.example.com"]);
+  });
+
+  it("preserves the order typed and drops blank lines", () => {
+    expect(normalizeAllowedOrigins(["https://b.example.com", "   ", "https://a.example.com", ""])).toEqual([
+      "https://b.example.com",
+      "https://a.example.com",
+    ]);
+  });
+
+  it("allows an empty list, which fails closed rather than open", () => {
+    expect(normalizeAllowedOrigins([])).toEqual([]);
+    expect(isOriginAllowed([], "https://app.example.com")).toBe(false);
+  });
+
+  it("rejects the whole list when one entry is bad, so a typo cannot be saved half-applied", () => {
+    expect(() => normalizeAllowedOrigins(["https://good.example.com", "https://*.bad.example.com"])).toThrow(
+      EmbedOriginError
+    );
+  });
+
+  it("refuses more origins than the ceiling", () => {
+    const tooMany = Array.from({ length: MAX_ALLOWED_ORIGINS + 1 }, (_, i) => `https://site-${i}.example.com`);
+    expect(() => normalizeAllowedOrigins(tooMany)).toThrow(new RegExp(`at most ${MAX_ALLOWED_ORIGINS} origins`));
+    expect(normalizeAllowedOrigins(tooMany.slice(0, MAX_ALLOWED_ORIGINS))).toHaveLength(MAX_ALLOWED_ORIGINS);
   });
 });

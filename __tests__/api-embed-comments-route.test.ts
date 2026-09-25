@@ -33,13 +33,18 @@ vi.mock("@/lib/embed-sources", async (importOriginal) => {
   };
 });
 
+vi.mock("@/lib/embed-visitor", () => ({ resolveEmbedVisitorToken: vi.fn() }));
+
 import { createComment } from "@/lib/comments";
 import { EMBED_TOKEN_PREFIX, EmbedSourceError, consumeEmbedRate, resolveEmbedToken, touchEmbedToken } from "@/lib/embed-sources";
+import { EMBED_VISITOR_HEADER } from "@/lib/embed/http";
+import { resolveEmbedVisitorToken } from "@/lib/embed-visitor";
 import { GET, OPTIONS, POST } from "@/app/api/embed/comments/route";
 
 const mockCreateComment = vi.mocked(createComment);
 const mockResolve = vi.mocked(resolveEmbedToken);
 const mockRate = vi.mocked(consumeEmbedRate);
+const mockVisitor = vi.mocked(resolveEmbedVisitorToken);
 
 const ORIGIN = "https://prototype.example.com";
 // Built from the exported prefix rather than pasted as one literal — the same
@@ -56,7 +61,20 @@ const RESOLVED = {
   allowedOrigins: [ORIGIN],
 };
 
-function post(body: unknown, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}`, origin: ORIGIN }) {
+// An opaque scoped visitor token, not an embed token — the two credentials are
+// distinct and a request carries both. Deliberately not a realistic `cmpvt_…`
+// value: resolveEmbedVisitorToken is mocked here, so the prefix check that would
+// reject this lives in that module's own tests.
+const VISITOR_TOKEN = "visitor-session-token";
+const VISITOR = { portalAccountId: "portal-1", email: "dana@example.com", name: "Dana" };
+
+/** A Vercel Blob public store origin, the only host a screenshot URL may name. */
+const BLOB_HOST = "https://examplestore.public.blob.vercel-storage.com";
+
+/** Both credentials plus an allowed Origin: the shape a signed-in widget sends. */
+const AUTHED = { authorization: `Bearer ${TOKEN}`, origin: ORIGIN, [EMBED_VISITOR_HEADER]: VISITOR_TOKEN };
+
+function post(body: unknown, headers: Record<string, string> = AUTHED) {
   return new NextRequest("http://localhost/api/embed/comments", {
     method: "POST",
     body: typeof body === "string" ? body : JSON.stringify(body),
@@ -83,6 +101,7 @@ function commentRow(overrides: Record<string, unknown> = {}) {
       pagePath: "/pricing",
       elementSelector: "main > button.cta",
       elementFingerprint: { tag: "BUTTON", text: "Start free" },
+      screenshotUrl: null,
     },
     ...overrides,
   };
@@ -91,6 +110,7 @@ function commentRow(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   mockResolve.mockResolvedValue({ ...RESOLVED });
+  mockVisitor.mockResolvedValue({ ...VISITOR });
   mockRate.mockResolvedValue(undefined);
   vi.mocked(touchEmbedToken).mockResolvedValue(undefined);
   mockCreateComment.mockResolvedValue({
@@ -104,7 +124,11 @@ describe("OPTIONS /api/embed/comments", () => {
     const response = await OPTIONS();
     expect(response.status).toBe(204);
     expect(response.headers.get("Access-Control-Allow-Methods")).toBe("GET, POST, OPTIONS");
-    expect(response.headers.get("Access-Control-Allow-Headers")).toBe("Authorization, Content-Type");
+    // The visitor header must be advertised or the browser blocks the request at
+    // the preflight, before the route ever runs.
+    expect(response.headers.get("Access-Control-Allow-Headers")).toBe(
+      `Authorization, Content-Type, ${EMBED_VISITOR_HEADER}`
+    );
   });
 
   it("never allows credentials, so no Compass session cookie can ride along", async () => {
@@ -166,6 +190,60 @@ describe("POST /api/embed/comments — credential and origin checks", () => {
   });
 });
 
+describe("POST /api/embed/comments — writer identity", () => {
+  // The embed token authorizes the *page*, not the person. Every visitor to a
+  // prototype shares it, so it can never stand in for an author.
+  it("401s a request carrying a valid embed token but no visitor token", async () => {
+    const response = await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p" }, { authorization: `Bearer ${TOKEN}`, origin: ORIGIN }));
+    expect(response.status).toBe(401);
+    // The code is what tells the widget to open the sign-in flow rather than
+    // showing the visitor a dead end.
+    await expect(response.json()).resolves.toMatchObject({ code: "PORTAL_AUTH_REQUIRED" });
+    expect(mockCreateComment).not.toHaveBeenCalled();
+  });
+
+  it("401s an unknown, expired, or revoked visitor token identically", async () => {
+    mockVisitor.mockResolvedValue(null);
+    const response = await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p" }));
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({ code: "PORTAL_AUTH_REQUIRED" });
+    expect(mockCreateComment).not.toHaveBeenCalled();
+  });
+
+  it("checks identity before parsing the body", async () => {
+    mockVisitor.mockResolvedValue(null);
+    const request = post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p" });
+    expect((await POST(request)).status).toBe(401);
+    expect(request.bodyUsed).toBe(false);
+  });
+
+  it("checks the origin allowlist before identity, so a bad origin never resolves a session", async () => {
+    await POST(post({ body: "hi" }, { ...AUTHED, origin: "https://evil.test" }));
+    expect(mockVisitor).not.toHaveBeenCalled();
+  });
+
+  it("accepts the visitor token with or without a Bearer prefix", async () => {
+    await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p" }, { ...AUTHED, [EMBED_VISITOR_HEADER]: `Bearer ${VISITOR_TOKEN}` }));
+    // The prefix is stripped, not passed through to the lookup.
+    expect(mockVisitor).toHaveBeenCalledWith(VISITOR_TOKEN, RESOLVED.sourceId);
+  });
+
+  it("scopes the visitor lookup to the source the embed token resolved to", async () => {
+    // The second argument is the scope check, and it must come from the resolved
+    // embed token — never from the request body or a query parameter, either of
+    // which the submitting page controls. A token minted for another prototype
+    // would otherwise authorize writes here.
+    await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p", sourceId: "source-somewhere-else" }));
+    expect(mockVisitor).toHaveBeenCalledWith(VISITOR_TOKEN, "source-1");
+  });
+
+  it("treats a whitespace-only visitor token as absent rather than looking it up", async () => {
+    const response = await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p" }, { ...AUTHED, [EMBED_VISITOR_HEADER]: "   " }));
+    expect(response.status).toBe(401);
+    expect(mockVisitor).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /api/embed/comments — submission", () => {
   it("creates a WIDGET comment on the source's own artifact with an element anchor", async () => {
     const response = await POST(
@@ -175,8 +253,6 @@ describe("POST /api/embed/comments — submission", () => {
         pagePath: "/pricing",
         elementSelector: "main > button.cta",
         elementFingerprint: { tag: "BUTTON", text: "Start free", rectYRatio: 0.82, bogus: "dropped" },
-        submitterName: "Dana",
-        submitterEmail: "dana@example.com",
       })
     );
     expect(response.status).toBe(201);
@@ -191,8 +267,13 @@ describe("POST /api/embed/comments — submission", () => {
     expect(input.source).toBe("WIDGET");
     // The submitter is not a Compass User; their identity lives on the extension row.
     expect(input.authorId).toBeNull();
+    // Taken from the resolved PortalAccount, not from the request.
     expect(input.authorName).toBe("Dana");
-    expect(input.externalAuthor).toEqual({ submitterEmail: "dana@example.com", embedTokenId: "token-1" });
+    expect(input.externalAuthor).toEqual({
+      submitterEmail: "dana@example.com",
+      portalAccountId: "portal-1",
+      embedTokenId: "token-1",
+    });
     expect(input.elementAnchor).toEqual({
       pageUrl: `${ORIGIN}/pricing`,
       pagePath: "/pricing",
@@ -206,10 +287,46 @@ describe("POST /api/embed/comments — submission", () => {
         rectHRatio: undefined,
       },
       artifactRevisionId: null,
+      screenshotUrl: null,
     });
     // The fingerprint is rebuilt field by field, so the JSON column cannot be
     // used by an embedding page as arbitrary storage.
     expect(input.elementAnchor?.elementFingerprint).not.toHaveProperty("bogus");
+  });
+
+  it("keeps a screenshot URL that is a blob object under the embed prefix", async () => {
+    await POST(
+      post({
+        body: "hi",
+        pageUrl: `${ORIGIN}/p`,
+        pagePath: "/p",
+        screenshotUrl: `${BLOB_HOST}/embed-feedback/ws-1/source-1/capture-abc123.jpg`,
+      })
+    );
+    expect(mockCreateComment.mock.calls[0][0].elementAnchor?.screenshotUrl).toBe(
+      `${BLOB_HOST}/embed-feedback/ws-1/source-1/capture-abc123.jpg`
+    );
+  });
+
+  // Dropped, not rejected. A comment is worth keeping even when its decoration
+  // is not, and every one of these is a URL that would be rendered as an <img>
+  // to an internal reviewer — which is to say, a tracking pixel aimed at the
+  // organisation if it were honoured.
+  it.each([
+    ["a URL on an attacker's host", "https://evil.example.com/embed-feedback/ws-1/source-1/x.jpg"],
+    ["a plain-http blob URL", `${BLOB_HOST.replace("https:", "http:")}/embed-feedback/ws-1/source-1/x.jpg`],
+    ["a blob object outside the embed prefix", `${BLOB_HOST}/feedback/ws-1/x.jpg`],
+    ["a host that merely contains the blob domain", "https://blob.vercel-storage.com.evil.example.com/embed-feedback/x.jpg"],
+    ["a non-URL string", "not-a-url"],
+    ["a data URL", "data:image/png;base64,AAAA"],
+    ["a number", 17],
+    ["an object", { url: `${BLOB_HOST}/embed-feedback/x.jpg` }],
+  ])("drops %s rather than storing it on the anchor", async (_label, screenshotUrl) => {
+    const response = await POST(
+      post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p", screenshotUrl })
+    );
+    expect(response.status).toBe(201);
+    expect(mockCreateComment.mock.calls[0][0].elementAnchor?.screenshotUrl).toBeNull();
   });
 
   it("ignores a caller-supplied target: the binding comes from the stored source row", async () => {
@@ -231,20 +348,29 @@ describe("POST /api/embed/comments — submission", () => {
     expect(input.authorId).toBeNull();
   });
 
-  it("falls back to the email, then to Anonymous, for the display name", async () => {
-    await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p", submitterEmail: "dana@example.com" }));
-    expect(mockCreateComment.mock.calls[0][0].authorName).toBe("dana@example.com");
-
-    mockCreateComment.mockClear();
+  it("falls back to the verified email when the account has no name", async () => {
+    mockVisitor.mockResolvedValue({ ...VISITOR, name: null });
     await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p" }));
-    expect(mockCreateComment.mock.calls[0][0].authorName).toBe("Anonymous");
+    expect(mockCreateComment.mock.calls[0][0].authorName).toBe("dana@example.com");
+    // Never "Anonymous": there is no longer a path that writes without an identity.
   });
 
-  it("drops an unparseable email rather than storing it", async () => {
-    await POST(post({ body: "hi", pageUrl: `${ORIGIN}/p`, pagePath: "/p", submitterEmail: "not an email" }));
+  it("ignores a caller-supplied name and email, so a comment cannot be misattributed", async () => {
+    await POST(
+      post({
+        body: "hi",
+        pageUrl: `${ORIGIN}/p`,
+        pagePath: "/p",
+        // What the first draft of this route trusted.
+        submitterName: "Tim Cook",
+        submitterEmail: "tcook@apple.com",
+        authorName: "Tim Cook",
+      })
+    );
     const input = mockCreateComment.mock.calls[0][0];
-    expect(input.externalAuthor?.submitterEmail).toBeNull();
-    expect(input.authorName).toBe("Anonymous");
+    expect(input.authorName).toBe("Dana");
+    expect(input.externalAuthor?.submitterEmail).toBe("dana@example.com");
+    expect(input.externalAuthor?.portalAccountId).toBe("portal-1");
   });
 
   it("sends no anchor on a reply, which inherits its parent's", async () => {
@@ -253,8 +379,13 @@ describe("POST /api/embed/comments — submission", () => {
     expect(input.parentId).toBe("comment-1");
     expect(input.elementAnchor).toBeUndefined();
     // An external author is still recorded — an outside submitter answering on
-    // their own thread is the normal case.
-    expect(input.externalAuthor).toEqual({ submitterEmail: null, embedTokenId: "token-1" });
+    // their own thread is the normal case, and a reply needs attribution as much
+    // as a root comment does.
+    expect(input.externalAuthor).toEqual({
+      submitterEmail: "dana@example.com",
+      portalAccountId: "portal-1",
+      embedTokenId: "token-1",
+    });
   });
 
   it("400s a root submission with no page identity", async () => {
@@ -348,6 +479,36 @@ describe("GET /api/embed/comments", () => {
     expect(payload.comments[0].replies[0]).toMatchObject({ id: "reply-1", edited: true, anchor: null });
   });
 
+  it("exposes the anchor's screenshot URL to readers of the thread", async () => {
+    // Safe to expose: the thread is already readable by anyone holding the page,
+    // and the image is a picture of an element on that same page.
+    const url = `${BLOB_HOST}/embed-feedback/ws-1/source-1/capture-abc123.jpg`;
+    mockWorkspace.findUnique.mockResolvedValue({ artifactFeedbackPublic: true });
+    mockComment.findMany
+      .mockResolvedValueOnce([
+        commentRow({
+          elementAnchor: {
+            pageUrl: `${ORIGIN}/pricing`,
+            pagePath: "/pricing",
+            elementSelector: "main > button.cta",
+            elementFingerprint: { tag: "BUTTON", text: "Start free" },
+            screenshotUrl: url,
+          },
+        }),
+      ])
+      .mockResolvedValueOnce([]);
+
+    const payload = await (await GET(get())).json();
+    expect(payload.comments[0].anchor.screenshotUrl).toBe(url);
+  });
+
+  it("reports a missing screenshot as null rather than omitting the field", async () => {
+    mockWorkspace.findUnique.mockResolvedValue({ artifactFeedbackPublic: true });
+    mockComment.findMany.mockResolvedValueOnce([commentRow()]).mockResolvedValueOnce([]);
+    const payload = await (await GET(get())).json();
+    expect(payload.comments[0].anchor).toHaveProperty("screenshotUrl", null);
+  });
+
   it("exposes nothing that identifies the submitter beyond their display name", async () => {
     mockWorkspace.findUnique.mockResolvedValue({ artifactFeedbackPublic: true });
     mockComment.findMany.mockResolvedValueOnce([commentRow()]).mockResolvedValueOnce([]);
@@ -382,6 +543,15 @@ describe("GET /api/embed/comments", () => {
     const payload = await (await GET(get())).json();
     expect(payload.comments).toEqual([]);
     expect(mockComment.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("needs no visitor identity: anonymous reading is the point of the feature", async () => {
+    mockWorkspace.findUnique.mockResolvedValue({ artifactFeedbackPublic: true });
+    mockComment.findMany.mockResolvedValue([]);
+    // No X-Compass-Visitor header at all — the embed token alone is enough to read.
+    const response = await GET(get("", { authorization: `Bearer ${TOKEN}`, origin: ORIGIN }));
+    expect(response.status).toBe(200);
+    expect(mockVisitor).not.toHaveBeenCalled();
   });
 
   it("draws reads from a separate quota than submissions", async () => {
