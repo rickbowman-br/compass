@@ -63,8 +63,8 @@ staged vs. unstaged content, missing/broken scanners, and historical exceptions.
 1. Remove the value from the code.
 2. **Rotate the credential.** Assume it is compromised the moment it is
    committed — rotation is not optional even if it was never pushed.
-3. Save the new value to 1Password *before* doing anything else with it, per
-   the standing rule in `CLAUDE.md`.
+3. Store the new value in the agent harness *before* doing anything else with
+   it, per the standing rule in `CLAUDE.md`.
 4. If it was already pushed, the value remains in history after removal from
    current code. Verify revocation. History rewriting is optional after
    revocation and cannot erase existing forks or caches; do not force-push
