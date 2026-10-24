@@ -696,6 +696,17 @@ Task is the standalone delivery/tracking entity used both for full engineering s
 | `unlink_task` | Remove a link between a Task and another Compass object (and its `entity_links` mirror row, whatever the flag says) |
 | `list_task_links` | List all links for a Task, grouped by linked object type with resolved titles |
 
+#### Agent conversation task list
+
+Inside an in-app agent turn (a turn credential only; an external MCP client's own task tools are unaffected) four extra tools use the Claude Code names the model already knows. They keep the agent's plan as ordinary Tasks (`source = AGENT`) linked to the conversation, so the plan card is read back from the server and the tasks show on the Tasks screen. The conversation is never an argument: it is resolved from the turn credential's live run, so one conversation cannot read or touch another's tasks. Outside an agent turn they return an error. For the team's board, use `create_task` instead.
+
+| Tool | Description |
+|---|---|
+| `TaskCreate` | Add a task (`subject`, `description`) to this conversation's task list |
+| `TaskUpdate` | Change a task's subject or description, or set its status to `pending`, `in_progress`, `completed`, or `deleted` (`deleted` cancels the Task rather than removing the row) |
+| `TaskList` | List this conversation's tasks |
+| `TaskGet` | Return one of this conversation's tasks by ID |
+
 ### Custom Fields
 
 Custom fields let a workspace tag Opportunities, Solutions, Experiments, Objectives, Key Results, Roadmap Items, or Tasks with admin-defined attributes (TEXT, NUMBER, DATE, URL, BOOLEAN, or a single/multi picklist SELECT/MULTI_SELECT). Field definitions and shared option sets are created and edited in Settings → Custom Fields; MCP can read definitions and read/write an object's values, but cannot create, edit, or delete a definition or option set.

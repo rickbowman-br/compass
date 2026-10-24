@@ -713,7 +713,7 @@ async function main(): Promise<void> {
     // §2.5), as do the docId-addressed edit_doc/edit_canvas/build_canvas_tree/
     // capture_canvas, which act on the saved doc directly.
     disallowedTools: [
-      // The SDK's own task tools would duplicate (and not persist like) the Compass-backed mcp__compass__Task* ones.
+      // The SDK's own task tools would duplicate (and not persist like) the Compass-backed mcp__compass__TaskCreate/TaskUpdate/TaskList/TaskGet ones. (Keep any glob character out of this list's comments: agent-turn-entry-policy.test.ts scans from "allowedTools: [" for one.)
       "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite",
       "mcp__compass__delete_assumption",
       "mcp__compass__delete_solution_comment",
