@@ -267,6 +267,9 @@ export function AgentChat({
   }, [isStreaming])
   const composerBlocked = processingLoading || Boolean(processing && (!processing.canContinue || processing.status === "RUNNING" || processing.status === "PENDING"))
 
+  // Set by a thread switch, read once by the scroll effect below. Declared before both effects so the compiler sees it before the first mutation.
+  const jumpToBottom = useRef(false)
+
   // Re-seed the transcript whenever the selected conversation changes — with one
   // exception, consumed exactly once.
   //
@@ -299,7 +302,6 @@ export function AgentChat({
   // Loading a different thread replaces the whole transcript, so jump straight
   // to the end instead of animating through every message. Smooth scrolling is
   // kept for incremental updates (new messages, streaming text).
-  const jumpToBottom = useRef(false)
   useEffect(() => {
     const instant = jumpToBottom.current
     jumpToBottom.current = false
