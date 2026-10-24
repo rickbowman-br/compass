@@ -137,7 +137,8 @@ describe("capability pack settings", () => {
       render(curatedPanel())
       fireEvent.click(await screen.findByRole("button", { name: "Update to latest" }))
       expect(await screen.findByRole("alert")).toHaveTextContent("installed version is unchanged")
-      expect(screen.getByRole("button", { name: "Update to latest" })).toBeEnabled()
+      // The alert renders before the transition that disables the button settles, so assert the end state.
+      await waitFor(() => expect(screen.getByRole("button", { name: "Update to latest" })).toBeEnabled())
     })
   })
 })

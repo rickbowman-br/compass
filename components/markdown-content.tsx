@@ -85,6 +85,7 @@ function componentsFor(Link: LinkRenderer, Image?: ImageRenderer): Components {
       // markdown is often model- or user-authored, and an <img> is a request the browser
       // makes on its own.
       img: Image ? ({ src, alt }) => <Image src={src} alt={alt} /> : () => null,
+      pre: PreBlock,
     };
     byImage.set(key, components);
   }

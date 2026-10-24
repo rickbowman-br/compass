@@ -20,7 +20,9 @@ describe("agent entry capability-pack policy", () => {
     // The list comes from agentTools() (scripts/agent/github-access.ts), whose output is
     // pinned in github-access.test.ts: the failure mode is additive drift, one more
     // "harmless" built-in at a time, none reviewed as a boundary change.
-    expect(source).toContain("tools: agentTools(Boolean(docsSession), githubShell),")
+    // The only addition is PLANNING_TOOLS (the plan list and subagent delegation); it is pinned so widening it is a reviewed change.
+    expect(source).toContain("tools: [...agentTools(Boolean(docsSession), githubShell), ...PLANNING_TOOLS],")
+    expect(source).toContain('const PLANNING_TOOLS = ["TodoWrite", "Agent", "Task"]')
     // Bash exists only through the jail: it is added by agentTools() when githubShell is
     // true, and githubShell is set only after prepareBashJail() proved the jail user.
     // Nothing else may name it in `tools`.
@@ -49,7 +51,7 @@ describe("agent entry capability-pack policy", () => {
     // no allowlist at all. `connectorToolPrefixes` is the only sanctioned way for
     // this list to grow, and it grows per turn from the grants that user holds.
     expect(source).toContain('...(docsSession ? ["mcp__docsfs", "Read", "Write", "Edit", "Glob"] : []),\n      ...(githubShell ? ["Bash"] : []),')
-    expect(source).toContain('"mcp__compass",\n      "WebFetch",\n      "mcp__web_search",')
+    expect(source).toContain('"mcp__compass",\n      "WebFetch",\n      ...PLANNING_TOOLS,\n      "mcp__web_search",')
     expect(source).toContain("...connectorToolPrefixes,")
     expect(source).not.toMatch(/allowedTools:\s*\[[^\]]*\*/)
   })
