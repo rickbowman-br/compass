@@ -246,8 +246,8 @@ export function AgentDrive({ workspaceId, basePath }: { workspaceId: string; bas
       className="fixed bottom-4 right-4 z-50 flex items-center gap-3 rounded-full border bg-background px-4 py-2 text-sm shadow-lg"
     >
       <span className="relative flex size-2.5">
-        <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-500 opacity-75" />
-        <span className="relative inline-flex size-2.5 rounded-full bg-amber-500" />
+        <span className="absolute inline-flex size-full animate-ping rounded-full bg-status-warning opacity-75" />
+        <span className="relative inline-flex size-2.5 rounded-full bg-status-warning" />
       </span>
       <span>{phase === "connecting" ? "Connecting…" : "An agent can move this tab and see your screen"}</span>
       <Button type="button" variant="destructive" size="sm" onClick={stop}>
