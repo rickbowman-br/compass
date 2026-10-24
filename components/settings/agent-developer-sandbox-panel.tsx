@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { updateDeveloperSandboxEnabled } from "@/app/[orgSlug]/[workspaceSlug]/settings/actions";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 
 interface Props {
   orgSlug: string;
@@ -48,7 +49,7 @@ export function AgentDeveloperSandboxPanel({ orgSlug, workspaceSlug, initialEnab
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3.5">
       <label className="flex items-start gap-2 text-sm" htmlFor="agent-developer-sandbox-enabled">
-        <input id="agent-developer-sandbox-enabled" type="checkbox" data-testid="agent-developer-sandbox-input" className="mt-0.5" checked={enabled} disabled={isPending} onChange={(event) => setEnabled(event.target.checked)} />
+        <Checkbox id="agent-developer-sandbox-enabled" data-testid="agent-developer-sandbox-input" className="mt-0.5" checked={enabled} disabled={isPending} onCheckedChange={(checked) => setEnabled(checked)} />
         <span>
           <span className="font-medium">Allow the developer sandbox</span>{" "}
           <span className="text-xs text-muted-foreground">— a larger sandbox with a local PostgreSQL, pnpm and build tools, for agents that build and test projects. It costs more per run than the standard sandbox.</span>
